@@ -21,8 +21,11 @@ ENABLE_BIND_MOUNTS=true  # Set to false to skip bind mounts
 
 # OPTIONAL: enable CIFS mount (e.g. for backups)
 ENABLE_CIFS_MOUNT=true
-CIFS_SOURCE="//192.168.1.20/bups"
-CIFS_TARGET="/mnt/bups"
+CIFS_HOSTNAME="nas.local"
+CIFS_IP="192.168.1.20"
+CIFS_SHARE="bups"
+CIFS_SOURCE="//$CIFS_HOSTNAME/$CIFS_SHARE"
+CIFS_TARGET="/mnt/$CIFS_SHARE"
 CIFS_CREDENTIALS="/etc/cifs_credentials"
 CIFS_UID=1000
 CIFS_GID=1000
@@ -69,14 +72,14 @@ log "Script started."
 read -p "Enter your username (default: $USER): " inputUser
 USER="${inputUser:-$USER}"
 
-defaultBtrfsOptions="ssd,noatime,space_cache=v2,compress=lzo"
+defaultBtrfsOptions="rw,noatime,compress=lzo,ssd,discard=async,space_cache=v2"
 
 declare -A btrfsOptionsBySubvol=(
     [@]="$defaultBtrfsOptions"
-    [@snapshots]="$defaultBtrfsOptions"
+    #[@snapshots]="$defaultBtrfsOptions"
     [@cache]="ssd,noatime,space_cache=v2,compress=no"
-    #[@log]="ssd,noatime,space_cache=v2,nodatacow,compress=no"
-    #[@tmp]="ssd,noatime,space_cache=v2"
+    [@log]="ssd,noatime,space_cache=v2,nodatacow,compress=no"
+    [@tmp]="ssd,noatime,space_cache=v2"
 )
 
 
@@ -101,11 +104,17 @@ fi
 declare -A subvolumes=(
     [@]="/"
     #[@home]="/home"
-    #[@log]="/var/log"
-    #[@tmp]="/var/tmp"
+    [@log]="/var/log"
+    [@tmp]="/var/tmp"
     [@cache]="/var/cache"
-    [@snapshots]="/.snapshots"
+    #[@snapshots]="/.snapshots"
 )
+
+# OPTIONAL bind mounts (e.g. ext4 /data to /home subdirs)
+declare -A bindMounts=(
+        ["/data/dev"]="/home/$USER/dev"
+        ["/data/bin"]="/home/$USER/bin"
+    )
 
 # Mount root volume if needed to create subvols
 if ! mountpoint -q /mnt; then
@@ -185,11 +194,6 @@ awk '$1 !~ /^#/ && $3 != "btrfs" && $3 != "vfat" && $3 != "swap" {print}' /etc/f
 if [ "$ENABLE_BIND_MOUNTS" = true ]; then
     echo -e "\n# Bind mounts from ext4 /data" >> /etc/fstab.new
 
-    declare -A bindMounts=(
-        ["/data/dev"]="/home/$USER/dev"
-        ["/data/bin"]="/home/$USER/bin"
-    )
-
     for src in "${!bindMounts[@]}"; do
         dst="${bindMounts[$src]}"
         if [ -d "$src" ]; then
@@ -199,8 +203,22 @@ if [ "$ENABLE_BIND_MOUNTS" = true ]; then
             log "Configured bind mount: $src -> $dst"
         else
             log "Skipping bind mount: source $src does not exist"
+            mkdir -p "$src"
+            log "Created source directory: $src"
+            mkdir -p "$dst"
+            chown "$USER:$USER" "$dst"
+            echo "$src $dst none bind,nofail 0 0" >> /etc/fstab.new
+            log "Configured bind mount: $src -> $dst"
         fi
     done
+    # Ensure CIFS hostname is mapped in /etc/hosts
+    log "Ensuring $CIFS_HOSTNAME is mapped to $CIFS_IP in /etc/hosts..."
+    if grep -qE "^\s*$CIFS_IP\s+$CIFS_HOSTNAME" /etc/hosts; then
+	log "Entry already exists in /etc/hosts: $CIFS_IP $CIFS_HOSTNAME"
+    else
+	echo "$CIFS_IP $CIFS_HOSTNAME" >> /etc/hosts
+	log "Added to /etc/hosts: $CIFS_IP $CIFS_HOSTNAME"
+    fi
 else
     log "Bind mounts from /data are disabled (ENABLE_BIND_MOUNTS=false)"
 fi
